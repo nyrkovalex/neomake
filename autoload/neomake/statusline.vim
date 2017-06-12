@@ -1,3 +1,5 @@
+scriptencoding utf-8
+
 let s:qflist_counts = {}
 let s:loclist_counts = {}
 
@@ -88,4 +90,138 @@ endfunction
 
 function! neomake#statusline#QflistStatus(...) abort
     return s:showErrWarning(neomake#statusline#QflistCounts(), a:0 ? a:1 : '')
+endfunction
+
+
+let s:cache = {}
+
+function! neomake#statusline#get_counts(bufnr) abort
+    return [get(s:loclist_counts, a:bufnr, {}), s:qflist_counts]
+endfunction
+
+function! neomake#statusline#get_filtered_counts(bufnr, ...) abort
+  let include = a:0 ? a:1 : []
+  let exclude = a:0 > 1 ? a:2 : []
+  let empty = a:0 > 2 ? a:3 : ''
+
+  let [loclist_counts, qf_errors] = GetNeomakeCounts(a:bufnr, 1)
+
+  let errors = []
+  for [type, c] in items(loclist_counts)
+    if len(include) && index(include, type) == -1 | continue | endif
+    if len(exclude) && index(exclude, type) != -1 | continue | endif
+    let errors += [type . ':' .c]
+  endfor
+  if ! empty(qf_errors)
+    for [type, c] in items(qf_errors)
+      if len(include) && index(include, type) == -1 | continue | endif
+      if len(exclude) && index(exclude, type) != -1 | continue | endif
+      let errors += [type . ':' .c]
+    endfor
+  endif
+  if len(errors)
+    return ' '.join(errors).' '
+  endif
+  return empty
+endfunction
+
+let s:formatter = {
+            \ 'args': {},
+            \ }
+function! s:formatter.running_job_names() abort
+    return join(map(s:running_jobs(self.args.bufnr), 'v:val.name'), ', ')
+endfunction
+
+function! s:formatter._substitute(l) abort
+    let s:f = get(self, a:l[1], '')
+    if empty(s:f)
+        call neomake#utils#ErrorMessage(printf(
+                    \ 'Unknown statusline format: %s.', a:l[1]))
+        return '{{'.a:l[1].'}}'
+    endif
+    try
+        return call(s:f, [], self)
+    catch
+        call neomake#utils#ErrorMessage(printf(
+                    \ 'Error while formatting statusline: %s.', v:exception))
+    endtry
+endfunction
+
+function! s:formatter.format(f, args) abort
+    let self.args = a:args
+    return substitute(a:f, '{{\(.*\)}}', self._substitute, 'g')
+endfunction
+
+function! s:running_jobs(bufnr) abort
+    return filter(copy(neomake#GetJobs()),
+                \ "v:val.bufnr == a:bufnr && get(v:val, 'running', 1)")
+endfunction
+
+function! neomake#statusline#get_status(bufnr, options) abort
+    let running_jobs = s:running_jobs(a:bufnr)
+
+    if !empty(running_jobs)
+        let format_running = get(a:options, 'format_running', '… ({{running_job_names}})')
+        let r = s:formatter.format(format_running, {'bufnr': a:bufnr})
+    else
+        let counts = neomake#statusline#get_counts(a:bufnr)
+        if counts == [{}, {}]
+            let r = get(a:options, 'format_ok', '✓')
+        else
+            let r = ''
+            let errors = neomake#statusline#get_filtered_counts(a:bufnr, ['E'])
+            if len(errors)
+                let r .= '%#StatColorNeomakeError#'.errors
+            endif
+            let nonerrors = neomake#statusline#get_filtered_counts(a:bufnr, [], ['E'])
+            if len(nonerrors)
+                let r .= '%#StatColorNeomakeNonError#'.nonerrors
+            endif
+        endif
+    endif
+    return r
+endfunction
+
+function! neomake#statusline#clear_cache(bufnr) abort
+    call s:clear_cache(a:bufnr)
+endfunction
+
+function! s:clear_cache(...) abort
+    let bufnr = a:0 ? a:1 : g:neomake_hook_context.jobinfo.bufnr
+    if has_key(s:cache, bufnr)
+        unlet s:cache[bufnr]
+    endif
+endfunction
+
+augroup neomake_statusline
+    autocmd!
+    autocmd User NeomakeJobStarted,NeomakeJobFinished call s:clear_cache()
+    autocmd BufWipeout * call s:clear_cache(expand('<abuf>'))
+augroup END
+
+function! neomake#statusline#get(bufnr, options) abort
+    if has_key(s:cache, a:bufnr)
+        echo 'cached, '.strftime('%c')
+        return s:cache[a:bufnr]
+    endif
+    let bufnr = +a:bufnr
+
+    let r = ''
+    let [disabled, source] = neomake#config#get_with_source('disabled', -1, {'bufnr': bufnr})
+    if disabled != -1
+        if disabled
+            let r .= source[0].'-'
+        else
+            let r .= source[0].'+'
+        endif
+    endif
+
+    let status = neomake#statusline#get_status(bufnr, a:options)
+    if has_key(a:options, 'format_status')
+        let status = printf(a:options.format_status, status)
+    endif
+    let r .= status
+
+    let s:cache[bufnr] = r
+    return r
 endfunction
